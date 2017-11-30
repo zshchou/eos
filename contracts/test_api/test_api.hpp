@@ -10,7 +10,7 @@
 #define WASM_TEST_FAIL 0xDEADBEEF
 #define WASM_TEST_PASS 0xB0CABACA
 
-#define WASM_ASSERT(m, message) if(!(m)) { WASM_TEST_ERROR_MESSAGE=(unsigned int)message; return WASM_TEST_FAIL; }
+#define WASM_ASSERT(m, message) if(!(m)) { prints(message);prints("\n"); WASM_TEST_ERROR_MESSAGE=(unsigned int)message; return WASM_TEST_FAIL; }
 
 typedef unsigned long long u64;
 typedef unsigned int u32;
@@ -30,6 +30,7 @@ static constexpr u64 WASM_TEST_ACTION(const char* cls, const char* method)
 #define WASM_TEST_HANDLER(CLASS, METHOD) \
   if( action == WASM_TEST_ACTION(#CLASS, #METHOD) ) { \
      WASM_TEST_ERROR_CODE = CLASS::METHOD(); \
+     prints(#CLASS);prints("::");prints(#METHOD);prints(" ");prints(WASM_TEST_ERROR_CODE == WASM_TEST_FAIL ? "FAIL" : "PASS");prints("\n"); \
      return; \
   }
 
@@ -151,6 +152,17 @@ struct test_transaction {
 
 struct test_chain {
   static unsigned int test_activeprods();
+};
+
+struct test_vector {
+  static unsigned int construct_all();
+  static unsigned int reserve();
+  static unsigned int assignment_operator();
+  static unsigned int index_operator();
+  static unsigned int index_out_of_bound();
+  static unsigned int destructor();
+  static unsigned int pod_type_general();
+
 };
 
 struct test_string {
