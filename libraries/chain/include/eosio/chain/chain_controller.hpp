@@ -100,6 +100,11 @@ namespace eosio { namespace chain {
           */
          signal<void(const signed_block&)> applied_irreversible_block;
 
+        /**
+         * Emitted after either of the above signals.
+         */
+         signal<void(const uint32_t lib_num, const uint32_t head_num, const block_id_type head_id)> chain_properties_on_block;
+
          /**
           * This signal is emitted any time a new transaction is added to the pending
           * block state.

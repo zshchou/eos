@@ -442,6 +442,7 @@ void chain_controller::_finalize_block( const block_trace& trace ) { try {
    applied_block( trace ); //emit
    if (_currently_replaying_blocks)
      applied_irreversible_block(b);
+   chain_properties_on_block(last_irreversible_block_num(), head_block_num(), head_block_id());
 
 } FC_CAPTURE_AND_RETHROW( (trace.block) ) }
 
@@ -1253,6 +1254,7 @@ void chain_controller::update_last_irreversible_block()
          assert(block);
          _block_log.append(*block);
          applied_irreversible_block(*block);
+         chain_properties_on_block(last_irreversible_block_num(), head_block_num(), head_block_id());
       }
    }
 

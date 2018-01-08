@@ -22,11 +22,15 @@
 #include <fc/reflect/variant.hpp>
 #include <fc/crypto/rand.hpp>
 #include <fc/exception/exception.hpp>
+#include <fc/log/logger_config.hpp>
 
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ip/host_name.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/intrusive/set.hpp>
+
+#include <thread>
+#include <future>
 
 namespace fc {
   extern std::unordered_map<std::string,logger>& get_logger_map();
@@ -130,11 +134,18 @@ namespace eosio {
 
   class net_plugin_impl {
   public:
+    boost::asio::io_service&         ios;
+    net_plugin_impl(boost::asio::io_service& i) : ios(i) {}
+
     unique_ptr<tcp::acceptor>        acceptor;
     tcp::endpoint                    listen_endpoint;
     string                           p2p_address;
     uint32_t                         max_client_count = 0;
     uint32_t                         num_clients = 0;
+
+    uint32_t                         chain_lib_num;
+    uint32_t                         chain_head_block_num;
+    block_id_type                    chain_head_block_id;
 
     vector<string>                   supplied_peers;
     vector<chain::public_key_type>   allowed_peers; ///< peer keys allowed to connect
@@ -461,7 +472,7 @@ namespace eosio {
 
     void txn_send_pending(const vector<transaction_id_type> &ids);
     void txn_send(const vector<transaction_id_type> &txn_lis);
-    uint32_t send_branch(chain_controller &cc, block_id_type bid, uint32_t lib_num, block_id_type lib_id);
+    uint32_t send_branch(block_id_type bid, uint32_t lib_num, block_id_type lib_id);
 
     void blk_send_branch( const vector<block_id_type> &ids);
     void blk_send(const vector<block_id_type> &txn_lis);
@@ -521,8 +532,11 @@ namespace eosio {
     connection_ptr      source;
     bool                active;
 
+    //these will be initalized after net_plugin startup
+    uint32_t            chain_lib_num;
+    uint32_t            chain_head_block_num;
+
     deque<block_id_type> _blocks;
-    chain_plugin * chain_plug;
 
   public:
     sync_manager(uint32_t span);
@@ -551,7 +565,7 @@ namespace eosio {
         trx_state(),
         sync_receiving(),
         sync_requested(),
-        socket( std::make_shared<tcp::socket>( std::ref( app().get_io_service() ))),
+        socket( std::make_shared<tcp::socket>( my_impl->ios  )),
         send_buffer(send_buf_size),
         node_id(),
         last_handshake(),
@@ -603,7 +617,7 @@ namespace eosio {
   void connection::initialize() {
       auto *rnd = node_id.data();
       rnd[0] = 0;
-      response_expected.reset(new boost::asio::steady_timer(app().get_io_service()));
+      response_expected.reset(new boost::asio::steady_timer(my_impl->ios));
     }
 
   bool connection::connected() {
@@ -685,11 +699,21 @@ namespace eosio {
     }
   }
 
-  uint32_t connection::send_branch(chain_controller &cc, block_id_type bid, uint32_t lib_num, block_id_type lib_id) {
+  uint32_t connection::send_branch(block_id_type bid, uint32_t lib_num, block_id_type lib_id) {
     static uint32_t dbg_depth = 0;
     uint32_t count = 0;
     try {
-      optional<signed_block> b = cc.fetch_block_by_id(bid);
+      std::promise<optional<signed_block>> promise;
+      std::future<optional<signed_block>> future = promise.get_future();
+      app().get_io_service().dispatch([&promise, bid, this](){
+        try {
+          promise.set_value(my_impl->chain_plug->chain().fetch_block_by_id(bid));
+        }
+        catch(...) {
+          promise.set_exception(std::current_exception());
+        }
+      });
+      optional<signed_block> b = future.get();
       if( b ) {
         block_id_type prev = b->previous;
         if( prev == lib_id) {
@@ -699,9 +723,19 @@ namespace eosio {
         else {
           uint32_t pnum = block_header::num_from_id( prev );
           if( pnum < lib_num ) {
-            uint32_t irr = cc.last_irreversible_block_num();
+            uint32_t irr = my_impl->chain_lib_num;
             elog( "Whoa! branch regression passed last irreversible block! depth = ${d}", ("d",dbg_depth ));
-            optional<signed_block> pb = cc.fetch_block_by_id (prev);
+            std::promise<optional<signed_block>> promise;
+            std::future<optional<signed_block>> future = promise.get_future();
+            app().get_io_service().dispatch([&promise, prev, this](){
+              try {
+                promise.set_value(my_impl->chain_plug->chain().fetch_block_by_id(prev));
+              }
+              catch(...) {
+                promise.set_exception(std::current_exception());
+              }
+            });
+            optional<signed_block> pb = future.get();
             block_id_type pprev;
             if (!pb ) {
               fc_dlog(logger, "no block for prev");
@@ -716,7 +750,7 @@ namespace eosio {
           }
           else {
             ++dbg_depth;
-            count = send_branch (cc, prev, lib_num, lib_id );
+            count = send_branch (prev, lib_num, lib_id );
             --dbg_depth;
             if (count > 0) {
               enqueue( *b );
@@ -733,8 +767,7 @@ namespace eosio {
 
 
   void connection::blk_send_branch(const vector<block_id_type> &ids) {
-    chain_controller &cc = my_impl->chain_plug->chain();
-    uint32_t head_num = cc.head_block_num ();
+    uint32_t head_num = my_impl->chain_head_block_num;
     notice_message note;
     note.known_blocks.mode = normal;
     note.known_blocks.pending = 0;
@@ -745,29 +778,48 @@ namespace eosio {
     }
     block_id_type head_id;
     block_id_type lib_id;
-    uint32_t lib_num;
+    uint32_t lib_num = my_impl->chain_lib_num;
+
     try {
-      lib_num = cc.last_irreversible_block_num();
-      if( lib_num != 0 )
-        lib_id = cc.get_block_id_for_num(lib_num);
-      head_id = cc.get_block_id_for_num(head_num);
+      if( lib_num != 0 ) {
+        std::promise<block_id_type> promise;
+        std::future<block_id_type> future = promise.get_future();
+        app().get_io_service().dispatch([&promise, lib_num](){
+          try {
+            promise.set_value(my_impl->chain_plug->chain().get_block_id_for_num(lib_num));
+          }
+          catch(...) {
+            promise.set_exception(std::current_exception());
+          }
+        });
+        lib_id = future.get();
+      }
+      head_id = my_impl->chain_head_block_id;
     }
     catch (const assert_exception &ex) {
       fc_dlog(logger, "caught assert ${x}",("x",ex.what()));
       enqueue(note);
       return;
     }
-    uint32_t count = send_branch(cc, head_id, lib_num, lib_id);
+    uint32_t count = send_branch(head_id, lib_num, lib_id);
     fc_dlog(logger, "Sent ${n} blocks on my fork",("n",count));
     syncing = false;
   }
 
   void connection::blk_send(const vector<block_id_type> &ids) {
-    chain_controller &cc = my_impl->chain_plug->chain();
-
     for(auto blkid : ids) {
+      std::promise<optional<signed_block>> promise;
+      std::future<optional<signed_block>> future = promise.get_future();
+      app().get_io_service().dispatch([&promise, blkid](){
       try {
-        optional<signed_block> b = cc.fetch_block_by_id(blkid);
+          promise.set_value(my_impl->chain_plug->chain().fetch_block_by_id(blkid));
+        }
+        catch(...) {
+          promise.set_exception(std::current_exception());
+        }
+      });
+      try {
+        optional<signed_block> b = future.get();
         if(b) {
           enqueue(*b);
         }
@@ -897,7 +949,12 @@ namespace eosio {
       sync_requested.reset();
     }
     try {
-      fc::optional<signed_block> sb = cc.fetch_block_by_number(num);
+      std::promise<fc::optional<signed_block>> fb_promise;
+      std::future<fc::optional<signed_block>> fb_future = fb_promise.get_future();
+      app().get_io_service().dispatch([&fb_promise, &cc, num](){
+         fb_promise.set_value(cc.fetch_block_by_number(num));
+      });
+      fc::optional<signed_block> sb = fb_future.get();
       if(sb) {
         enqueue( *sb );
         return true;
@@ -1095,12 +1152,12 @@ namespace eosio {
     ,source()
     ,active(false)
   {
-    chain_plug = app( ).find_plugin<chain_plugin>( );
   }
 
   void sync_manager::reset_lib_num() {
-    sync_known_lib_num = chain_plug->chain().last_irreversible_block_num();
-    sync_last_requested_num = chain_plug->chain().head_block_num();
+    sync_known_lib_num = chain_lib_num;
+    sync_last_requested_num = chain_head_block_num;
+
      for (auto& c : my_impl->connections) {
       if( c->last_handshake.last_irreversible_block_num > sync_known_lib_num) {
         sync_known_lib_num =c->last_handshake.last_irreversible_block_num;
@@ -1112,14 +1169,14 @@ namespace eosio {
   }
 
   bool sync_manager::sync_required( ) {
-    fc_dlog(logger, "ours = ${ours} known = ${known} head = ${head}",("ours",sync_last_requested_num)("known",sync_known_lib_num)("head",chain_plug->chain( ).head_block_num( )));
+    fc_dlog(logger, "ours = ${ours} known = ${known} head = ${head}",("ours",sync_last_requested_num)("known",sync_known_lib_num)("head",chain_head_block_num));
 
     return( sync_last_requested_num < sync_known_lib_num ||
-            chain_plug->chain( ).head_block_num( ) < sync_last_requested_num );
+            chain_head_block_num < sync_last_requested_num );
   }
 
   void sync_manager::request_next_chunk( connection_ptr conn = connection_ptr() ) {
-    uint32_t head_block = chain_plug->chain().head_block_num();
+    uint32_t head_block = chain_head_block_num;
 
     if (head_block < sync_last_requested_num) {
       fc_dlog (logger, "ignoring request, head is ${h} last req = ${r}",("h",head_block)("r",sync_last_requested_num));
@@ -1166,8 +1223,8 @@ namespace eosio {
     }
     if (!source) {
       elog("Unable to continue syncing at this time");
-      sync_last_requested_num = chain_plug->chain().head_block_num();
-      sync_known_lib_num = chain_plug->chain().last_irreversible_block_num();
+      sync_last_requested_num = chain_head_block_num;
+      sync_known_lib_num = chain_lib_num;
       return;
     }
 
@@ -1207,7 +1264,7 @@ namespace eosio {
     c->sync_receiving.swap(ss);
     fc_dlog(logger, "conn ${n} covered blks ${s} to ${e}",("n",c->peer_name() )("s",ss->start_block)("e",ss->end_block));
 
-    if( chain_plug->chain().head_block_num() == sync_known_lib_num ) {
+    if( chain_head_block_num == sync_known_lib_num ) {
       handshake_message hello;
       handshake_initializer::populate(hello);
       fc_dlog(logger, "All caught up with last known last irreversible block resending handshake");
@@ -1228,8 +1285,8 @@ namespace eosio {
     }
 
     if (!sync_required()) {
-      uint32_t bnum = chain_plug->chain().last_irreversible_block_num();
-      uint32_t hnum = chain_plug->chain().head_block_num();
+      uint32_t bnum = chain_lib_num;
+      uint32_t hnum = chain_head_block_num;
       fc_dlog( logger, "We are already caught up, my irr = ${b}, head = ${h}, target = ${t}",
                ("b",bnum)("h",hnum)("t",target));
       active = false;
@@ -1248,7 +1305,7 @@ namespace eosio {
   }
 
   void sync_manager::reassign_fetch(connection_ptr c, go_away_reason reason) {
-    sync_last_requested_num = chain_plug->chain().head_block_num();
+    sync_last_requested_num = chain_head_block_num;
     c->cancel_sync (reason);
     request_next_chunk();
   }
@@ -1328,7 +1385,7 @@ namespace eosio {
 
 
     void net_plugin_impl::start_listen_loop( ) {
-      auto socket = std::make_shared<tcp::socket>( std::ref( app().get_io_service() ) );
+      auto socket = std::make_shared<tcp::socket>( my_impl->ios );
       acceptor->async_accept( *socket, [socket,this]( boost::system::error_code ec ) {
           if( !ec ) {
             int visitors = 0;
@@ -1447,8 +1504,7 @@ namespace eosio {
 
     void net_plugin_impl::handle_message( connection_ptr c, const handshake_message &msg) {
       ilog("got a handshake_message from ${p} ${h}", ("p",c->peer_addr)("h",msg.p2p_address));
-      chain_controller& cc = chain_plug->chain();
-      uint32_t lib_num = cc.last_irreversible_block_num( );
+      uint32_t lib_num = chain_lib_num;
       uint32_t peer_lib = msg.last_irreversible_block_num;
       if( c->connecting ) {
         c->connecting = false;
@@ -1510,8 +1566,18 @@ namespace eosio {
         fc_dlog(logger, "lib_num = ${ln} peer_lib = ${pl}",("ln",lib_num)("pl",peer_lib));
 
         if( peer_lib <= lib_num && peer_lib > 0) {
+          std::promise<block_id_type> promise;
+          std::future<block_id_type> future = promise.get_future();
+          app().get_io_service().dispatch([&promise, &peer_lib, this]() {
+            try {
+              promise.set_value(chain_plug->chain().get_block_id_for_num(peer_lib));
+            }
+            catch(...) {
+              promise.set_exception(std::current_exception());
+            }
+          });
           try {
-            block_id_type peer_lib_id =  cc.get_block_id_for_num( peer_lib);
+            block_id_type peer_lib_id = future.get();
             on_fork =( msg.last_irreversible_block_id != peer_lib_id);
           }
           catch( ...) {
@@ -1546,8 +1612,8 @@ namespace eosio {
       //
       //-----------------------------
 
-      uint32_t head = cc.head_block_num( );
-      block_id_type head_id = cc.head_block_id();
+      uint32_t head = chain_head_block_num;
+      block_id_type head_id = chain_head_block_id;
       if (head_id == msg.head_id) {
         fc_dlog(logger, "sync check state 0");
         notice_message note;
@@ -1653,7 +1719,6 @@ namespace eosio {
       notice_message fwd;
       request_message req;
       bool send_req = false;
-      chain_controller &cc = chain_plug->chain();
       switch (msg.known_trx.mode) {
       case none:
         break;
@@ -1726,9 +1791,19 @@ namespace eosio {
       case normal : {
         req.req_blocks.mode = normal;
         for( const auto& blkid : msg.known_blocks.ids) {
+          std::promise<optional<signed_block>> promise;
+          std::future<optional<signed_block>> future = promise.get_future();
+          app().get_io_service().dispatch([&promise, this, blkid](){
+            try {
+              promise.set_value(chain_plug->chain().fetch_block_by_id(blkid));
+            }
+            catch(...) {
+              promise.set_exception(std::current_exception());
+            }
+          });
           optional<signed_block> b;
           try {
-            b = cc.fetch_block_by_id(blkid);
+            b = future.get();
           } catch (const assert_exception &ex) {
             elog( "caught assert on fetch_block_by_id, ${ex}",("ex",ex.what()));
             // keep going, client can ask another peer
@@ -1879,6 +1954,7 @@ namespace eosio {
         c->trx_state.modify(tx,trx_mod(msg.ref_block_num));
       }
 
+      app().get_io_service().dispatch([msg, this](){
       try {
         chain_plug->accept_transaction( msg );
         fc_dlog(logger, "chain accepted transaction" );
@@ -1889,23 +1965,33 @@ namespace eosio {
       catch( ...) {
         elog( " caught something attempting to accept transaction");
       }
-
+      });
     }
 
   void net_plugin_impl::handle_message( connection_ptr c, const signed_block &msg) {
     fc_dlog(logger, "got signed_block #${n} from ${p}", ("n",msg.block_num())("p",c->peer_name()));
-    chain_controller &cc = chain_plug->chain();
     block_id_type blk_id = msg.id();
     bool has_chunk = false;
     uint32_t num = msg.block_num();
     bool syncing = sync_master->active;
+
+    std::promise<bool> promise;
+    std::future<bool> future = promise.get_future();
+    app().get_io_service().dispatch([&promise, &blk_id, this]() {
+      try {
+        promise.set_value(chain_plug->chain().is_known_block(blk_id));
+      }
+      catch(...) {
+        promise.set_exception(std::current_exception());
+      }
+    });
     try {
-      if( cc.is_known_block(blk_id)) {
+      if( future.get()) {
         return;
       }
     } catch( ...) {
     }
-    if( cc.head_block_num() >= msg.block_num()) {
+    if( chain_head_block_num >= msg.block_num()) {
       elog( "received forking block #${n} from ${p}",( "n",num)("p",c->peer_name()));
     }
     fc::microseconds age( fc::time_point::now() - msg.timestamp);
@@ -1930,10 +2016,21 @@ namespace eosio {
       }
     }
     go_away_reason reason = fatal_other;
-    fc_dlog(logger, "last irreversible block = ${lib}", ("lib", cc.last_irreversible_block_num()));
-    if( !syncing || num == cc.head_block_num()+1 ) {
+    fc_dlog(logger, "last irreversible block = ${lib}", ("lib", chain_lib_num));
+    if( !syncing || num == chain_head_block_num+1 ) {
+      std::promise<void> promise;
+      std::future<void> future = promise.get_future();
+      app().get_io_service().dispatch([&promise, &msg, &syncing, this]() {
+        try {
+          chain_plug->accept_block(msg, syncing);
+          promise.set_value();
+        }
+        catch(...) {
+          promise.set_exception(std::current_exception());
+        }
+      });
       try {
-        chain_plug->accept_block(msg, syncing);
+        future.get();
         reason = no_reason;
       } catch( const unlinkable_block_exception &ex) {
         elog( "unlinkable_block_exception accept block #${n} syncing from ${p}",("n",num)("p",c->peer_name()));
@@ -2042,8 +2139,8 @@ namespace eosio {
     }
 
     void net_plugin_impl::start_monitors() {
-      connector_check.reset(new boost::asio::steady_timer( app().get_io_service()));
-      transaction_check.reset(new boost::asio::steady_timer( app().get_io_service()));
+      connector_check.reset(new boost::asio::steady_timer( my_impl->ios));
+      transaction_check.reset(new boost::asio::steady_timer( my_impl->ios));
       start_conn_timer();
       start_txn_timer();
     }
@@ -2055,8 +2152,7 @@ namespace eosio {
       auto ex_lo = old.lower_bound( fc::time_point_sec( 0));
       old.erase( ex_lo, ex_up);
       auto &stale = local_txns.get<by_block_num>();
-      chain_controller &cc = chain_plug->chain();
-      uint32_t bn = cc.last_irreversible_block_num();
+      uint32_t bn = chain_lib_num;
       auto bn_up = stale.upper_bound(bn);
       auto bn_lo = stale.lower_bound(0);
       stale.erase( bn_lo, bn_up);
@@ -2205,8 +2301,14 @@ namespace eosio {
         auto private_it = private_keys.find(msg.key);
         bool found_producer_key = false;
         producer_plugin* pp = app().find_plugin<producer_plugin>();
-        if(pp != nullptr)
-          found_producer_key = pp->is_producer_key(msg.key);
+        if(pp != nullptr) {
+          std::promise<bool> pk_promise;
+          std::future<bool> pk_future = pk_promise.get_future();
+          app().get_io_service().dispatch([&pk_promise, &pp, &msg](){
+            pk_promise.set_value(pp->is_producer_key(msg.key));
+          });
+          found_producer_key = pk_future.get();
+        }
         if( allowed_it == allowed_peers.end() && private_it == private_keys.end() && !found_producer_key) {
           elog( "Peer ${peer} sent a handshake with an unauthorized key: ${key}.",
                 ("peer", msg.p2p_address)("key", msg.key));
@@ -2256,8 +2358,17 @@ namespace eosio {
       if(!private_keys.empty())
         return private_keys.begin()->first;
       producer_plugin* pp = app().find_plugin<producer_plugin>();
-      if(pp != nullptr && pp->get_state() == abstract_plugin::started)
-        return pp->first_producer_public_key();
+      if(pp) {
+        std::promise<chain::public_key_type> promise;
+        std::future<chain::public_key_type> future = promise.get_future();
+        app().get_io_service().dispatch([&promise, &pp]() {
+          if(pp->get_state() != abstract_plugin::started)
+            promise.set_value(chain::public_key_type());
+          else
+            promise.set_value(pp->first_producer_public_key());
+        });
+        return future.get();
+      }
       return chain::public_key_type();
     }
 
@@ -2267,8 +2378,17 @@ namespace eosio {
       if(private_key_itr != private_keys.end())
         return private_key_itr->second.sign(digest);
       producer_plugin* pp = app().find_plugin<producer_plugin>();
-      if(pp != nullptr && pp->get_state() == abstract_plugin::started)
-        return pp->sign_compact(signer, digest);
+      if(pp) {
+        std::promise<chain::signature_type> promise;
+        std::future<chain::signature_type> future = promise.get_future();
+        app().get_io_service().dispatch([&promise, &pp, &signer, &digest]() {
+          if(pp->get_state() != abstract_plugin::started)
+            promise.set_value(chain::signature_type());
+          else
+            promise.set_value(pp->sign_compact(signer, digest));
+        });
+        return future.get();
+      }
       return chain::signature_type();
     }
 
@@ -2298,6 +2418,10 @@ namespace eosio {
 
 
     chain_controller& cc = my_impl->chain_plug->chain();
+
+    std::promise<void> promise;
+    std::future<void> future = promise.get_future();
+    app().get_io_service().dispatch([&cc, &promise, &hello]() {
     hello.head_id = fc::sha256();
     hello.last_irreversible_block_id = fc::sha256();
     hello.head_num = cc.head_block_num();
@@ -2318,10 +2442,20 @@ namespace eosio {
         hello.head_num = 0;
       }
     }
+    promise.set_value();
+  });
+  future.wait();
   }
 
-  net_plugin::net_plugin()
-    :my( new net_plugin_impl ) {
+  net_plugin::net_plugin() {
+    _network_ios = std::make_unique<boost::asio::io_service>();
+    _network_thread = std::thread([this]() {
+      fc::set_thread_name("netthread");
+      boost::asio::io_service::work workwork(*_network_ios);
+      _network_ios->run();
+    });
+
+    my.reset( new net_plugin_impl(*_network_ios) );
     my_impl = my.get();
   }
 
@@ -2359,6 +2493,13 @@ namespace eosio {
   void net_plugin::plugin_initialize( const variables_map& options ) {
     ilog("Initialize net plugin");
 
+    my->chain_plug = app().find_plugin<chain_plugin>();
+    my->chain_plug->get_chain_id(my->chain_id);
+
+    std::promise<void> initialize_promise;
+    std::future<void> initialize_future = initialize_promise.get_future();
+
+    _network_ios->dispatch([this, &initialize_promise, &options]() {
     // Housekeeping so fc::logger::get() will work as expected
     fc::get_logger_map()[connection::logger_name] = connection::logger;
     fc::get_logger_map()[net_plugin_impl::logger_name] = net_plugin_impl::logger;
@@ -2398,7 +2539,7 @@ namespace eosio {
     my->num_clients = 0;
     my->started_sessions = 0;
 
-    my->resolver = std::make_shared<tcp::resolver>( std::ref( app().get_io_service() ) );
+    my->resolver = std::make_shared<tcp::resolver>( *_network_ios );
     if(options.count("p2p-listen-endpoint")) {
       my->p2p_address = options.at("p2p-listen-endpoint").as< string >();
       auto host = my->p2p_address.substr( 0, my->p2p_address.find(':') );
@@ -2409,7 +2550,7 @@ namespace eosio {
 
       my->listen_endpoint = *my->resolver->resolve( query);
 
-      my->acceptor.reset( new tcp::acceptor( app().get_io_service() ) );
+      my->acceptor.reset( new tcp::acceptor( *_network_ios ) );
     }
     if(options.count("p2p-server-address")) {
       my->p2p_address = options.at("p2p-server-address").as< string >();
@@ -2476,16 +2617,32 @@ namespace eosio {
       my->send_whole_blocks = options.at( "send-whole-blocks" ).as<bool>();
     }
 
-    my->chain_plug = app().find_plugin<chain_plugin>();
-    my->chain_plug->get_chain_id(my->chain_id);
     fc::rand_pseudo_bytes(my->node_id.data(), my->node_id.data_size());
     ilog("my node_id is ${id}",("id",my->node_id));
 
-    my->keepalive_timer.reset(new boost::asio::steady_timer(app().get_io_service()));
+    my->keepalive_timer.reset(new boost::asio::steady_timer(*_network_ios));
     my->ticker();
+    initialize_promise.set_value();
+    });
+    initialize_future.wait();
   }
 
   void net_plugin::plugin_startup() {
+    my->chain_lib_num = my->sync_master->chain_lib_num = my->chain_plug->chain().last_irreversible_block_num();
+    my->chain_head_block_num = my->sync_master->chain_head_block_num = my->chain_plug->chain().head_block_num();
+    my->chain_head_block_id = my->chain_plug->chain().head_block_id();
+    my->chain_plug->chain().chain_properties_on_block.connect(
+       _network_ios->wrap([this](const uint32_t lib, const uint32_t head, block_id_type headid) {
+          my->chain_lib_num = my->sync_master->chain_lib_num = lib;
+          my->chain_head_block_num = my->sync_master->chain_head_block_num = head;
+          my->chain_head_block_id = headid;
+       })
+    );
+
+    std::promise<void> startup_promise;
+    std::future<void> startup_future = startup_promise.get_future();
+
+    _network_ios->dispatch([this, &startup_promise]() {
     if( my->acceptor ) {
       my->acceptor->open(my->listen_endpoint.protocol());
       my->acceptor->set_option(tcp::acceptor::reuse_address(true));
@@ -2495,15 +2652,24 @@ namespace eosio {
       my->start_listen_loop();
     }
 
-    my->chain_plug->chain().on_pending_transaction.connect( &net_plugin_impl::transaction_ready);
+    my->chain_plug->chain().on_pending_transaction.connect( _network_ios->wrap([this](auto a){
+       my->transaction_ready(a);
+    }));
     my->start_monitors();
 
     for( auto seed_node : my->supplied_peers ) {
        connect( seed_node );
     }
+
+    startup_promise.set_value();
+    });
+    startup_future.wait();
   }
 
   void net_plugin::plugin_shutdown() {
+    _network_ios->stop();
+    _network_thread.join();
+
     try {
       ilog( "shutdown.." );
       my->done = true;
@@ -2520,11 +2686,14 @@ namespace eosio {
         my->acceptor.reset(nullptr);
       }
       ilog( "exit shutdown" );
-    } FC_CAPTURE_AND_RETHROW() }
+    } FC_CAPTURE_AND_RETHROW()
+}
 
     void net_plugin::broadcast_block( const chain::signed_block &sb) {
+      _network_ios->dispatch([this, sb]() {
       fc_dlog(my->logger, "broadcasting block #${num}",("num",sb.block_num()) );
       my->broadcast_block_impl( sb);
+      });
     }
 
   size_t net_plugin::num_peers() const {

@@ -6,6 +6,7 @@
 #include <appbase/application.hpp>
 #include <eosio/chain_plugin/chain_plugin.hpp>
 #include <eos/net_plugin/protocol.hpp>
+#include <thread>
 
 namespace eosio {
    using namespace appbase;
@@ -39,7 +40,10 @@ namespace eosio {
 
         size_t num_peers() const;
       private:
+        //make sure io_service outlives net_plugin_impl
+        std::unique_ptr<boost::asio::io_service> _network_ios;
         std::unique_ptr<class net_plugin_impl> my;
+        std::thread _network_thread;
    };
 
 }
