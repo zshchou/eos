@@ -638,6 +638,17 @@ class context_aware_api {
       apply_context&     context;
 };
 
+class crypto_api : public context_aware_api {
+   public:
+      using context_aware_api::context_aware_api;
+
+   void assert_sha256( array_ptr<char> data, size_t datalen, const fc::sha256& hash ) {
+      FC_ASSERT( datalen > 0 );
+      auto result = fc::sha256::hash( data, datalen );
+      FC_ASSERT( result == hash, "hash miss match" );
+   }
+};
+
 class system_api : public context_aware_api {
    public:
       using context_aware_api::context_aware_api;
@@ -896,6 +907,10 @@ class transaction_api : public context_aware_api {
       }
 
 };
+
+REGISTER_INTRINSICS(crypto_api,
+   (assert_sha256,      void(int, int, int))
+);
 
 REGISTER_INTRINSICS(system_api,
    (assert,      void(int, int))

@@ -155,9 +155,12 @@ template<>
 struct native_to_wasm<const fc::time_point_sec &> {
    using type = I32;
 };
-
 template<>
 struct native_to_wasm<fc::time_point_sec> {
+   using type = I32;
+};
+template<>
+struct native_to_wasm<const fc::sha256 &> {
    using type = I32;
 };
 
@@ -192,6 +195,11 @@ auto convert_wasm_to_native(native_to_wasm_t<T> val) {
 template<>
 auto convert_wasm_to_native<wasm_double>(I64 val) {
    return wasm_double(*reinterpret_cast<wasm_double *>(&val));
+}
+
+template<>
+auto convert_wasm_to_native<const fc::sha256&>(I32 val) {
+   return *reinterpret_cast<const fc::sha256*>(val);
 }
 
 template<typename T>

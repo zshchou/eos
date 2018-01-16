@@ -50,16 +50,6 @@ struct public_key {
    uint8_t data[33];
 };
 
-struct asset {
-   share_type   amount;
-   asset_symbol symbol;
-};
-
-struct price {
-   asset base;
-   asset quote;
-};
-
 struct signature {
    uint8_t data[65];
 };

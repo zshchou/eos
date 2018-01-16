@@ -1,0 +1,147 @@
+{
+  "types": [{
+      "new_type_name": "eos_tokens",
+      "type": "tokens"
+    }
+  ],
+  "structs": [{
+      "name": "tokens",
+      "base": "",
+      "fields": {
+        "quantity": "uint64"
+      }
+    },{
+      "name": "offer_bet",
+      "base": "",
+      "fields": {
+        "amount": "eos_tokens",
+        "player": "account_name",
+        "commitment": "checksum"
+      }
+    },{
+      "name": "cancel_offer",
+      "base": "",
+      "fields": {
+        "commitment": "checksum"
+      }
+    },{
+      "name": "reveal",
+      "base": "",
+      "fields": {
+        "commitment": "checksum",
+        "source": "checksum"
+      }
+    },{
+      "name": "claim_expired",
+      "base": "",
+      "fields": {
+        "gameid": "uint64"
+      }
+    },{
+      "name": "offer_primary_key",
+      "base": "",
+      "fields": {
+        "owner": "account_name",
+        "bet": "eos_tokens"
+      }
+    },{
+      "name": "offer",
+      "base": "",
+      "fields": {
+        "primary": "offer_primary_key",
+        "commitment": "checksum",
+        "gameid": "uint64"
+      }
+    },{
+      "name": "player",
+      "base": "",
+      "fields": {
+        "commitment": "checksum",
+        "reveal": "checksum"
+      }
+    },{
+      "name": "game",
+      "base": "",
+      "fields": {
+        "gameid": "uint64",
+        "bet": "eos_tokens",
+        "deadline": "time",
+        "player1": "player",
+        "player2": "player"
+      }
+    },{
+      "name": "global_dice",
+      "base": "",
+      "fields": {
+        "nextgameid": "uint64"
+      }
+    },{
+      "name": "account",
+      "base": "",
+      "fields": {
+        "owner": "account_name",
+        "eos_balance": "eos_tokens",
+        "open_offers": "uint32",
+        "open_games": "uint32"
+      }
+    }
+  ],
+  "actions": [{
+      "action_name": "offerbet",
+      "type": "offer_bet"
+    },{
+      "action_name": "canceloffer",
+      "type": "cancel_offer"
+    },{
+      "action_name": "reveal",
+      "type": "reveal"
+    },{
+      "action_name": "claimexpired",
+      "type": "claim_expired"
+    }
+  ],
+  "tables": [{
+      "table_name": "offer",
+      "index_type": "i128i128",
+      "key_names": [
+        "primary",
+        "commitment"
+      ],
+      "key_types": [
+        "offer_primary_key",
+        "checksum"
+      ],
+      "type": "offer"
+    },{
+      "table_name": "game",
+      "index_type": "i64",
+      "key_names": [
+        "gameid"
+      ],
+      "key_types": [
+        "uint64"
+      ],
+      "type": "game"
+    },{
+      "table_name": "global",
+      "index_type": "i64",
+      "key_names": [
+        "nextgameid"
+      ],
+      "key_types": [
+        "uint64"
+      ],
+      "type": "global_dice"
+    },{
+      "table_name": "account",
+      "index_type": "i64",
+      "key_names": [
+        "owner"
+      ],
+      "key_types": [
+        "account_name"
+      ],
+      "type": "account"
+    }
+  ]
+}

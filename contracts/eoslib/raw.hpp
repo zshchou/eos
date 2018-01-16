@@ -62,72 +62,6 @@ namespace eosio {
    }
    
   /**
-   *  Serialize a signed_int into a stream
-   *  @param s stream to write
-   *  @param v value to be serialized
-   */
-   template<typename Stream> 
-   void pack( Stream& s, const signed_int& v ) {
-      uint32_t val = (v.value<<1) ^ (v.value>>31);
-      do {
-         uint8_t b = uint8_t(val) & 0x7f;
-         val >>= 7;
-         b |= ((val > 0) << 7);
-         s.write((char*)&b,1);//.put(b);
-      } while( val );
-   }
-  
-  /**
-   *  Serialize an unsigned_int into a stream
-   *  @param s stream to write
-   *  @param v value to be serialized
-   */
-   template<typename Stream> 
-   void pack( Stream& s, const unsigned_int& v ) {
-      uint64_t val = v.value;
-      do {
-         uint8_t b = uint8_t(val) & 0x7f;
-         val >>= 7;
-         b |= ((val > 0) << 7);
-         s.write((char*)&b,1);//.put(b);
-      }while( val );
-   }
-
-  /**
-   *  Deserialize a signed_int from a stream
-   *  @param s stream to read
-   *  @param v destination of deserialized value
-   */
-   template<typename Stream> 
-   void unpack( Stream& s, signed_int& vi ) {
-      uint32_t v = 0; char b = 0; int by = 0;
-      do {
-         s.get(b);
-         v |= uint32_t(uint8_t(b) & 0x7f) << by;
-         by += 7;
-      } while( uint8_t(b) & 0x80 );
-      vi.value = ((v>>1) ^ (v>>31)) + (v&0x01);
-      vi.value = v&0x01 ? vi.value : -vi.value;
-      vi.value = -vi.value;
-   }
-
-  /**
-   *  Deserialize an unsigned_int from a stream
-   *  @param s stream to read
-   *  @param v destination of deserialized value
-   */
-   template<typename Stream> 
-   void unpack( Stream& s, unsigned_int& vi ) {
-      uint64_t v = 0; char b = 0; uint8_t by = 0;
-      do {
-         s.get(b);
-         v |= uint32_t(uint8_t(b) & 0x7f) << by;
-         by += 7;
-      } while( uint8_t(b) & 0x80 );
-      vi.value = static_cast<uint32_t>(v);
-   }
-
-  /**
    *  Serialize a bytes struct into a stream
    *  @param s stream to write
    *  @param v value to be serialized
@@ -271,49 +205,6 @@ namespace eosio {
       v.len = size;
    }
   
-  /**
-   *  Serialize a price into a stream
-   *  @param s stream to write
-   *  @param v value to be serialized
-   */
-   template<typename Stream> 
-   void pack( Stream& s, const ::price& v )  {
-      eosio::raw::pack(s, v.base);
-      eosio::raw::pack(s, v.quote);
-   }
-
-  /**
-   *  Deserialize a price from a stream
-   *  @param s stream to read
-   *  @param v destination of deserialized value
-   */
-   template<typename Stream> 
-   void unpack( Stream& s, ::price& v)  {
-      eosio::raw::unpack(s, v.base);
-      eosio::raw::unpack(s, v.quote);
-   }
-  /**
-   *  Serialize an asset into a stream
-   *  @param s stream to write
-   *  @param v value to be serialized
-   */
-   template<typename Stream> 
-   void pack( Stream& s, const ::asset& v )  {
-      eosio::raw::pack(s, v.amount);
-      eosio::raw::pack(s, v.symbol);
-   }
-
-  /**
-   *  Deserialize an asset from a stream
-   *  @param s stream to read
-   *  @param v destination of deserialized value
-   */
-   template<typename Stream> 
-   void unpack( Stream& s, ::asset& v)  {
-      eosio::raw::unpack(s, v.amount);
-      eosio::raw::unpack(s, v.symbol);
-   }
-
    template<typename Stream> 
    void pack(Stream &s, const ::account_permission &pe) {
       eosio::raw::pack(s, pe.account);
