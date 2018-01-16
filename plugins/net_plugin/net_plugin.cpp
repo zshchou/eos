@@ -1465,6 +1465,11 @@ namespace eosio {
       }
     }
 
+   // The handshake message is the first message sent between newly connected peers.
+   // Each side sends a handshake message describing its current state.
+   // On receipt of the first handshake message on a new connection, the peer is evaluated
+   // for suitability to continue the connection. Then both sides determine chain status
+   // and whether to send catch-up blocks in one direction or the other.
     void net_plugin_impl::handle_message( connection_ptr c, const handshake_message &msg) {
       ilog("got a handshake_message from ${p} ${h}", ("p",c->peer_addr)("h",msg.p2p_address));
       chain_controller& cc = chain_plug->chain();
@@ -1485,7 +1490,7 @@ namespace eosio {
           for(const auto &check : connections) {
             if(check == c)
               continue;
-            if(check->connected() && check->peer_name() == msg.p2p_address) {
+            if(check->connected() && check->node_id == msg.node_id) {
               fc_dlog(logger, "sending go_away duplicate to ${ep}", ("ep",msg.p2p_address) );
               go_away_message gam(go_away_reason::duplicate);
               gam.node_id = node_id;
@@ -1562,7 +1567,7 @@ namespace eosio {
       // 2. my lib > peer head num - send an last_irr_catch_up notice if not the first generation
       //
       // 3  my head block num <= peer head block num - update sync state and send a catchup request
-      // 4  my head block num > peer block num ssend a notice catchup if this is not the first generation
+      // 4  my head block num > peer block num - send a catchup notice if this is not the first generation
       //
       //-----------------------------
 
@@ -1622,6 +1627,7 @@ namespace eosio {
       elog ("sync check failed to resolve status");
       return;
     }
+
 
   void net_plugin_impl::handle_message( connection_ptr c, const go_away_message &msg ) {
     string rsn = reason_str( msg.reason );
@@ -1985,7 +1991,7 @@ namespace eosio {
       }
     }
     else {
-      if( reason == unlinkable ) {
+       if( reason == unlinkable && sync_master->sync_last_requested_num < cc.head_block_num() ) {
         ilog("See if we can re-request the missing block");
 
         handshake_message hello;
@@ -2013,7 +2019,8 @@ namespace eosio {
                   sendit = true;
                 }
               }
-              fc_dlog(logger, "${action} block ${num} to ${c}",("action", sendit ? "sending " : "skipping ")("num",num)("c", conn->peer_name() ));
+              fc_dlog(logger, "${action} block ${num} to ${c}",
+                      ("action", sendit ? "sending " : "skipping ")("num",num)("c", conn->peer_name() ));
               return sendit;
             });
         }
