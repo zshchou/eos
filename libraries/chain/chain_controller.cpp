@@ -903,8 +903,15 @@ void chain_controller::process_message(const transaction& trx, account_name code
    const blockchain_configuration& chain_configuration = get_global_properties().configuration;
    auto us_duration = (fc::time_point::now() - start_time).count();
    if( is_producing() ) {
-      EOS_ASSERT(us_duration < chain_configuration.max_trx_runtime, checktime_exceeded,
-                  "Transaction message exceeded maximum total transaction time of ${limit}ms, took ${duration}ms", ("limit", chain_configuration.max_trx_runtime/1000)("dur",us_duration/1000));
+      EOS_ASSERT(us_duration < chain_configuration.max_trx_runtime/10, checktime_exceeded,
+                  "Transaction message exceeded maximum total transaction time of ${limit}ms, took ${dur}ms",
+                 ("limit", chain_configuration.max_trx_runtime/1000)("dur",us_duration/1000));
+   }
+   else {
+      if (us_duration > chain_configuration.max_trx_runtime) {
+         wlog ("timeout exceeded during replay,  ${limit}ms, took ${dur}ms",
+              ("limit", chain_configuration.max_trx_runtime/1000)("dur",us_duration/1000));
+     }
    }
    EOS_ASSERT(depth < chain_configuration.in_depth_limit, msg_resource_exhausted,
      "Message processing exceeded maximum inline recursion depth of ${limit}", ("limit", chain_configuration.in_depth_limit));
@@ -981,10 +988,12 @@ void chain_controller::apply_message(apply_context& context)
        try {
           wasm_interface::get().apply(context, execution_time, is_producing() );
        } catch (const fc::exception &ex) {
-          // The particular exception that is causing havoc is generated in the wasm layer, and is
+          // The particular exception that is causing havoc in at least block 936299 of
+          // the DAWN 2.0 testnet is generated in the wasm layer, and is
           // Runtime::Exception::Cause::integerDivideByZeroOrIntegerOverflow)
           if (!is_producing()) {
-             wlog ("apply_message ignoring exception while not producing");
+             wlog ("apply_message ignoring exception while not producing: ${ex}",
+                  ("ex", ex.to_string()));
           }
           else
              throw;
@@ -1288,7 +1297,7 @@ void chain_controller::replay() {
                           skip_tapos_check |
                           skip_producer_schedule_check |
                           skip_authority_check |
-                          received_block);
+                          irreversible );
    }
    auto end = fc::time_point::now();
    ilog("Done replaying ${n} blocks, elapsed time: ${t} sec",
@@ -1313,6 +1322,9 @@ void chain_controller::spinup_fork_db()
    if(last_block.valid()) {
       _fork_db.start_block(*last_block);
       if (last_block->id() != head_block_id()) {
+        ilog("last_block->num = ${lbn}", ("lbn",last_block->block_num()));
+        ilog("head_block_id = ${hbid}", ("hbid",head_block_id()));
+        if (head_block_num() != last_block->block_num() && head_block_num() != last_block->block_num()+1)
            FC_ASSERT(head_block_num() == 0, "last block ID does not match current chain state",
                      ("last_block->id", last_block->id())("head_block_num",head_block_num()));
       }
