@@ -50,7 +50,7 @@ namespace eosio {
 
    class connection;
    class sync_manager;
-
+   class big_msg_manager;
 
    using connection_ptr = std::shared_ptr<connection>;
    using connection_wptr = std::weak_ptr<connection>;
@@ -156,6 +156,7 @@ namespace eosio {
       std::set< connection_ptr >       connections;
       bool                             done = false;
       unique_ptr< sync_manager >       sync_master;
+      unique_ptr< big_msg_manager >    bm_master;
 
       unique_ptr<boost::asio::steady_timer> connector_check;
       unique_ptr<boost::asio::steady_timer> transaction_check;
@@ -263,6 +264,7 @@ namespace eosio {
        * If there are no configured private keys, returns an empty signature.
        */
       chain::signature_type sign_compact(const chain::public_key_type& signer, const fc::sha256& digest) const;
+
       static const fc::string logger_name;
       static fc::logger logger;
    };
@@ -275,8 +277,6 @@ namespace eosio {
    }
 
    static net_plugin_impl *my_impl;
-   const fc::string net_plugin_impl::logger_name("net_plugin_impl");
-   fc::logger net_plugin_impl::logger(net_plugin_impl::logger_name);
 
    /**
     * default value initializers
@@ -496,13 +496,9 @@ namespace eosio {
        * encountered unpacking or processing the message.
        */
       bool process_next_message(net_plugin_impl& impl, uint32_t message_length);
-
       static const fc::string logger_name;
       static fc::logger logger;
    };
-
-   const fc::string connection::logger_name("connection");
-   fc::logger connection::logger(connection::logger_name);
 
    struct msgHandler : public fc::visitor<void> {
       net_plugin_impl &impl;
@@ -543,8 +539,29 @@ namespace eosio {
       static fc::logger logger;
    };
 
+   class big_msg_manager {
+   public:
+      void bcast (const signed_block& msg);
+      void bcast (const signed_transaction& msg);
+      void send_to (connection_ptr conn, const signed_block& msg);
+      void send_to (connection_ptr conn, const signed_transaction& msg);
+      void recv_msg (connection_ptr conn, const signed_block& msg);
+      void recv_msg (connection_ptr conn, const signed_transaction& msg);
+      void recv_msg (connection_ptr conn, const notice_message& msg);
+      void recv_msg (connection_ptr conn, const request_message& msg);
+
+      static const fc::string logger_name;
+      static fc::logger logger;
+   };
+
+   const fc::string net_plugin_impl::logger_name("net_plugin_impl");
+   fc::logger net_plugin_impl::logger(net_plugin_impl::logger_name);
+   const fc::string connection::logger_name("connection");
+   fc::logger connection::logger(connection::logger_name);
    const fc::string sync_manager::logger_name("sync_manager");
    fc::logger sync_manager::logger(sync_manager::logger_name);
+   const fc::string big_msg_manager::logger_name("big_msg_manager");
+   fc::logger big_msg_manager::logger(big_msg_manager::logger_name);
 
    //---------------------------------------------------------------------------
 
@@ -1278,6 +1295,32 @@ namespace eosio {
       sync_last_requested_num = chain_plug->chain().head_block_num();
       c->cancel_sync (reason);
       request_next_chunk();
+   }
+
+   //------------------------------------------------------------------------
+
+   void big_msg_manager::bcast (const signed_block& msg) {
+   }
+
+   void big_msg_manager::bcast (const signed_transaction& msg) {
+   }
+
+   void big_msg_manager::send_to (connection_ptr conn, const signed_block& msg) {
+   }
+
+   void big_msg_manager::send_to (connection_ptr conn, const signed_transaction& msg) {
+   }
+
+   void big_msg_manager::recv_msg (connection_ptr conn, const signed_block& msg) {
+   }
+
+   void big_msg_manager::recv_msg (connection_ptr conn, const signed_transaction& msg) {
+   }
+
+   void big_msg_manager::recv_msg (connection_ptr conn, const notice_message& msg) {
+   }
+
+   void big_msg_manager::recv_msg (connection_ptr conn, const request_message& msg) {
    }
 
    //------------------------------------------------------------------------
@@ -2361,6 +2404,7 @@ namespace eosio {
       fc::get_logger_map()[connection::logger_name] = connection::logger;
       fc::get_logger_map()[net_plugin_impl::logger_name] = net_plugin_impl::logger;
       fc::get_logger_map()[sync_manager::logger_name] = sync_manager::logger;
+      fc::get_logger_map()[big_msg_manager::logger_name] = big_msg_manager::logger;
 
       // Setting a parent would in theory get us the default appenders for free but
       // a) the parent's log level overrides our own in that case; and
@@ -2369,6 +2413,7 @@ namespace eosio {
          connection::logger.add_appender(appender);
          net_plugin_impl::logger.add_appender(appender);
          sync_manager::logger.add_appender(appender);
+         big_msg_manager::logger.add_appender(appender);
       }
 
       if( options.count( "log-level-net-plugin" ) ) {
@@ -2379,6 +2424,7 @@ namespace eosio {
          connection::logger.set_log_level(logl);
          net_plugin_impl::logger.set_log_level(logl);
          sync_manager::logger.set_log_level(logl);
+         big_msg_manager::logger.set_log_level(logl);
       }
 
       my->network_version = static_cast<uint16_t>(app().version());
