@@ -759,7 +759,7 @@ namespace eosio {
          head_id = cc.get_block_id_for_num(head_num);
       }
       catch (const assert_exception &ex) {
-         fc_dlog(logger, "caught assert ${x}",("x",ex.what()));
+         elog( "unable to retrieve block info: ${n} for ${p}",("n",ex.to_string())("p",peer_name()));
          enqueue(note);
          return;
       }
@@ -770,20 +770,29 @@ namespace eosio {
 
    void connection::blk_send(const vector<block_id_type> &ids) {
       chain_controller &cc = my_impl->chain_plug->chain();
-
-      for(auto blkid : ids) {
+      int count = 0;
+      for(auto &blkid : ids) {
+         ++count;
          try {
             optional<signed_block> b = cc.fetch_block_by_id(blkid);
             if(b) {
                enqueue(*b);
             }
+            else {
+               ilog ("fetch block by id returned null, id ${id} on block ${c} of ${s} for ${p}",
+                     ("id",blkid)("c",count)("s",ids.size())("p",peer_name()));
+               break;
+            }
          }
          catch (const assert_exception &ex) {
-            elog( "caught assert on fetch_block_by_id, ${ex}",("ex",ex.what()));
-            // keep going, client can ask another peer
+            elog( "caught assert on fetch_block_by_id, ${ex}, id ${id} on block ${c} of ${s} for ${p}",
+                  ("ex",ex.to_string())("id",blkid)("c",count)("s",ids.size())("p",peer_name()));
+            break;
          }
          catch (...) {
-            elog( "failed to retrieve block for id");
+            elog( "caught othser exception fetching block id ${id} on block ${c} of ${s} for ${p}",
+                  ("id",blkid)("c",count)("s",ids.size())("p",peer_name()));
+            break;
          }
       }
    }
@@ -1685,7 +1694,6 @@ namespace eosio {
       // notices of previously unknown blocks or txns,
       //
       fc_dlog(logger, "got a notice_message from ${p}", ("p",c->peer_name()));
-      notice_message fwd;
       request_message req;
       bool send_req = false;
       chain_controller &cc = chain_plug->chain();
@@ -1695,7 +1703,6 @@ namespace eosio {
       case last_irr_catch_up: {
          c->last_handshake_recv.head_num = msg.known_trx.pending;
          req.req_trx.mode = none;
-         fwd.known_trx.mode = none;
          break;
       }
       case catch_up : {
@@ -1713,8 +1720,6 @@ namespace eosio {
          break;
       }
       case normal: {
-         fwd.known_trx.mode = normal;
-         fwd.known_trx.pending = 0;
          req.req_trx.mode = normal;
          req.req_trx.pending = 0;
          for( const auto& t : msg.known_trx.ids ) {
@@ -1724,9 +1729,6 @@ namespace eosio {
                c->trx_state.insert( ( transaction_state ){ t,true,true,( uint32_t ) - 1,
                         fc::time_point( ),fc::time_point( ) } );
 
-               if( !sync_master->active ) {
-                  fwd.known_trx.ids.push_back( t );
-               }
                req.req_trx.ids.push_back( t );
             }
          }
@@ -1765,14 +1767,15 @@ namespace eosio {
             try {
                b = cc.fetch_block_by_id(blkid);
             } catch (const assert_exception &ex) {
-               elog( "caught assert on fetch_block_by_id, ${ex}",("ex",ex.what()));
+               ilog( "caught assert on fetch_block_by_id, ${ex}",("ex",ex.what()));
                // keep going, client can ask another peer
             } catch (...) {
                elog( "failed to retrieve block for id");
             }
             if(!b) {
-               c->block_state.insert((block_state){blkid,false,true,fc::time_point::now()});
-               fwd.known_blocks.ids.push_back(blkid);
+               bool known=true;
+               bool noticed=true;
+               c->block_state.insert((block_state){blkid,known,noticed,fc::time_point::now()});
                send_req = true;
                req.req_blocks.ids.push_back(blkid);
             }
@@ -1782,47 +1785,6 @@ namespace eosio {
       default: {
          fc_dlog(logger, "received a bogus known_blocks.mode ${m} from ${p}",("m",static_cast<uint32_t>(msg.known_blocks.mode))("p",c->peer_name()));
       }
-      }
-
-      if (fwd.known_trx.mode == normal ||
-          fwd.known_blocks.mode == normal) {
-         for (auto &conn : my_impl->connections) {
-            if (conn->syncing || conn == c) {
-               continue;
-            }
-            notice_message to_peer;
-            to_peer.known_trx.mode = fwd.known_trx.mode;
-            if (fwd.known_trx.mode == normal) {
-               for (const auto &t : fwd.known_trx.ids) {
-                  const auto &tx = conn->trx_state.get<by_id>( ).find( t );
-                  if( tx == conn->trx_state.end( ) ) {
-                     conn->trx_state.insert((transaction_state){t,false,true,(uint32_t)-1,
-                              fc::time_point(),fc::time_point()});
-                     to_peer.known_trx.ids.push_back( t );
-                  }
-               }
-               if (to_peer.known_trx.ids.empty()) {
-                  to_peer.known_trx.mode = none;
-               }
-            }
-            to_peer.known_blocks.mode = fwd.known_blocks.mode;
-            if (fwd.known_blocks.mode == normal) {
-               for (const auto &bid : fwd.known_blocks.ids) {
-                  const auto &blk = conn->block_state.get<by_id>( ).find( bid );
-                  if( blk == conn->block_state.end( ) ) {
-                     conn->block_state.insert((block_state){bid,false,true,fc::time_point()} );
-                     to_peer.known_blocks.ids.push_back( bid );
-                  }
-               }
-               if (to_peer.known_blocks.ids.empty()) {
-                  to_peer.known_blocks.mode = none;
-               }
-            }
-            if (to_peer.known_trx.mode == normal ||
-                to_peer.known_blocks.mode == normal) {
-               conn->enqueue (to_peer);
-            }
-         }
       }
       fc_dlog(logger, "send req = ${sr}", ("sr",send_req));
       if( send_req) {
@@ -2186,8 +2148,8 @@ namespace eosio {
                const auto& bs = c->trx_state.find(txnid);
                bool unknown = bs == c->trx_state.end();
                if( unknown) {
-
                   fc_dlog(logger, "sending notice to ${n}", ("n",c->peer_name() ) );
+
                   c->trx_state.insert(transaction_state({txnid,false,true,(uint32_t)-1,
                               fc::time_point(),fc::time_point() }));
                }
