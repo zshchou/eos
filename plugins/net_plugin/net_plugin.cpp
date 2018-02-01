@@ -282,7 +282,7 @@ namespace eosio {
    constexpr auto     def_txn_expire_wait = std::chrono::seconds(3);
    constexpr auto     def_resp_expected_wait = std::chrono::seconds(1);
    constexpr auto     def_sync_fetch_span = 100;
-   constexpr auto     def_max_just_send = 1500 * 8; // "mtu" * 8
+   constexpr auto     def_max_just_send = 1500 * 3; // "mtu" * 3
    constexpr auto     def_send_whole_blocks = true;
 
    constexpr auto     message_header_size = 4;
@@ -921,7 +921,8 @@ namespace eosio {
    }
 
    void connection::cancel_sync(go_away_reason reason) {
-      fc_dlog(logger,"cancel sync reason = ${m}, out queue size ${o} ", ("m",reason_str(reason)) ("o", out_queue.size()));
+      fc_dlog(logger,"cancel sync reason = ${m}, out queue size ${o} peer ${p}",
+              ("m",reason_str(reason)) ("o", out_queue.size())("p", peer_name()));
       cancel_wait();
       flush_queues();
       switch (reason) {
@@ -1349,7 +1350,7 @@ namespace eosio {
             notice_message note;
             note.known_trx.mode = none;
             note.known_blocks.mode = catch_up;
-            note.known_blocks.pending = head - lib_num;
+            note.known_blocks.ids.push_back(head_id);
             c->enqueue( note );
          }
          c->syncing = true;
@@ -1359,15 +1360,17 @@ namespace eosio {
    }
 
    void sync_manager::recv_notice (connection_ptr c, const notice_message &msg) {
+      ilog ("sync_manager got ${m} block notice",("m",modes_str(msg.known_blocks.mode)));
       if (msg.known_blocks.mode == catch_up) {
          c->fork_head = msg.known_blocks.ids[0];
+         ilog ("sync_manager got catch_up notice, fork_head = ${fh}",
+               ("fh",c->fork_head));
          state = head_catchup;
          request_message req;
          req.req_trx.mode = none;
          req.req_blocks.mode = catch_up;
-         req.req_blocks.pending = msg.known_blocks.pending;
-         net_message msg (req);
-         c->enqueue (msg);
+
+         c->enqueue (req);
       }
       else {
          c->last_handshake_recv.last_irreversible_block_num = msg.known_trx.pending;
@@ -1397,8 +1400,11 @@ namespace eosio {
       last_repeated = 0;
 
       if (state == head_catchup) {
+         ilog ("sync_manager in head_catchup state");
          if (c->fork_head != block_id_type() ) {
+            ilog ("sync_manager connection fork head set");
             if (c->fork_head == blk.id() ) {
+               ilog ("sync_manager connection fork head matches received id");
                c->fork_head = block_id_type();
                state = in_sync;
                for (auto cp : my_impl->connections) {
@@ -1414,6 +1420,7 @@ namespace eosio {
          uint32_t num = blk.block_num();
          if( num == sync_known_lib_num ) {
             ilog("All caught up with last known last irreversible block resending handshake");
+            c->cancel_wait();
             state = in_sync;
             send_handshakes();
          }
@@ -1429,28 +1436,24 @@ namespace eosio {
    //------------------------------------------------------------------------
 
    void big_msg_manager::bcast_summary (const block_summary_message& bsm) {
-      net_message msg(bsm);
       //iterate through the transaction ids and send to any connection which does not know
       // about the transaction
-      my_impl->send_all( msg,[](connection_ptr c) -> bool { return true; });
+      my_impl->send_all( bsm,[](connection_ptr c) -> bool { return true; });
    }
 
    void big_msg_manager::bcast_block (connection_ptr skip, const signed_block& sb) {
       net_message msg(sb);
       uint32_t packsiz = fc::raw::pack_size(msg);
       uint32_t msgsiz = packsiz + sizeof(packsiz);
-
-      if (msgsiz <= just_send_it_max) {
-         my_impl->send_all( msg,[skip](connection_ptr c) -> bool { return c != skip; });
-      }
-      else {
-         notice_message pending_notify;
-         block_id_type bid = sb.id();
-         pending_notify.known_blocks.mode = normal;
-         pending_notify.known_blocks.ids.push_back( bid );
-         pending_notify.known_trx.mode = none;
-         net_message nmsg(pending_notify);
-         my_impl->send_all(nmsg, [skip, bid](connection_ptr c) -> bool {
+      notice_message pending_notify;
+      block_id_type bid = sb.id();
+      pending_notify.known_blocks.mode = normal;
+      pending_notify.known_blocks.ids.push_back( bid );
+      pending_notify.known_trx.mode = none;
+      if (msgsiz > just_send_it_max) {
+         my_impl->send_all(pending_notify, [skip, bid](connection_ptr c) -> bool {
+               if (c == skip || c->syncing)
+                  return false;
                const auto& bs = c->blk_state.find(bid);
                bool unknown = bs == c->blk_state.end();
                if (unknown) {
@@ -1459,8 +1462,24 @@ namespace eosio {
                else {
                   elog("${p} already has knowledge of block ${b}", ("p",c->peer_name())("b",bid));
                }
-               return skip != c && unknown;
+               return unknown;
             });
+      }
+      else {
+         block_id_type prev = sb.previous;
+         for (auto cp : my_impl->connections) {
+            if (cp == skip || cp->syncing) {
+               continue;
+            }
+            const auto& bs = cp->blk_state.find (prev);
+            if (bs != cp->blk_state.end() && !bs->is_known) {
+               cp->blk_state.insert(block_state({bid,false,true,fc::time_point() }));
+               cp->enqueue( pending_notify );
+            }
+            else {
+               cp->enqueue( sb );
+            }
+         }
       }
    }
 
@@ -1488,8 +1507,8 @@ namespace eosio {
       fc_dlog(logger, "bufsiz = ${bs} max = ${max}",("bs", bufsiz)("max", just_send_it_max));
 
       if( bufsiz <= just_send_it_max) {
-         my_impl->send_all( msg, [skip, txnid](connection_ptr c) -> bool {
-               if( c == skip ) {
+         my_impl->send_all( txn, [skip, txnid](connection_ptr c) -> bool {
+               if( c == skip || c->syncing ) {
                   return false;
                }
                const auto& bs = c->trx_state.find(txnid);
@@ -1507,8 +1526,10 @@ namespace eosio {
          pending_notify.known_trx.mode = normal;
          pending_notify.known_trx.ids.push_back( txnid );
          pending_notify.known_blocks.mode = none;
-         net_message nmsg(pending_notify);
-         my_impl->send_all(nmsg, [skip, txnid](connection_ptr c) -> bool {
+         my_impl->send_all(pending_notify, [skip, txnid](connection_ptr c) -> bool {
+               if (c == skip || c->syncing) {
+                  return false;
+               }
                const auto& bs = c->trx_state.find(txnid);
                bool unknown = bs == c->trx_state.end();
                if( unknown) {
@@ -1517,7 +1538,7 @@ namespace eosio {
                   c->trx_state.insert(transaction_state({txnid,false,true,(uint32_t)-1,
                               fc::time_point(),fc::time_point() }));
                }
-               return skip != c && unknown;
+               return unknown;
             });
       }
 
@@ -1551,8 +1572,7 @@ namespace eosio {
          note.known_blocks.mode = normal;
          note.known_blocks.ids.push_back( blk_id );
          note.known_trx.mode = none;
-         net_message nmsg(note);
-         my_impl->send_all(nmsg, [blk_id](connection_ptr conn) -> bool {
+         my_impl->send_all(note, [blk_id](connection_ptr conn) -> bool {
                const auto& bs = conn->blk_state.find(blk_id);
                bool unknown = bs == conn->blk_state.end();
                if (unknown) {
@@ -1566,9 +1586,9 @@ namespace eosio {
       }
       else {
          net_message nmsg(msg);
-         if(fc::raw::pack_size(nmsg) < just_send_it_max && !my_impl->sync_master->is_active(c) ) {
+         if(fc::raw::pack_size(nmsg) < just_send_it_max ) {
             fc_dlog(logger, "forwarding the signed block");
-            my_impl->send_all( nmsg, [c, blk_id, num](connection_ptr conn) -> bool {
+            my_impl->send_all( msg, [c, blk_id, num](connection_ptr conn) -> bool {
                   bool sendit = false;
                   if( c != conn && !conn->syncing ) {
                      auto b = conn->blk_state.get<by_id>().find(blk_id);
@@ -1594,8 +1614,7 @@ namespace eosio {
          notify.known_trx.mode = normal;
          notify.known_trx.ids.push_back( txn_id );
          notify.known_blocks.mode = none;
-         net_message nmsg(notify);
-         my_impl->send_all(nmsg, [txn_id](connection_ptr conn) -> bool {
+         my_impl->send_all(notify, [txn_id](connection_ptr conn) -> bool {
                const auto& bs = conn->trx_state.find(txn_id);
                bool unknown = bs == conn->trx_state.end();
                if (unknown) {
@@ -1663,7 +1682,7 @@ namespace eosio {
          elog ("passed a notice_message with something other than a normal on none known_blocks");
          return;
       }
-      fc_dlog(logger, "send req = ${sr}", ("sr",send_req));
+      ilog("send req = ${sr}", ("sr",send_req));
       if( send_req) {
          c->enqueue(req);
       }
@@ -2073,11 +2092,11 @@ namespace eosio {
    void net_plugin_impl::handle_message( connection_ptr c, const request_message &msg) {
       switch (msg.req_blocks.mode) {
       case catch_up :
-         fc_dlog(logger, "got a catch_up request_message from ${p}", ("p",c->peer_name()));
+         ilog( "got a catch_up request_message from ${p}", ("p",c->peer_name()));
          c->blk_send_branch( );
          break;
       case normal :
-         fc_dlog(logger, "got a normal request_message from ${p}", ("p",c->peer_name()));
+         fc_ilog(logger, "got a normal request_message from ${p}", ("p",c->peer_name()));
          c->blk_send(msg.req_blocks.ids);
          break;
       default:;
