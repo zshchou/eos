@@ -166,14 +166,6 @@ const string wallet_unlock = wallet_func_base + "/unlock";
 const string wallet_import_key = wallet_func_base + "/import_key";
 const string wallet_sign_trx = wallet_func_base + "/sign_transaction";
 
-inline std::vector<name> sort_names( const std::vector<name>& names ) {
-   auto results = std::vector<name>(names);
-   std::sort( results.begin(), results.end() );
-   auto itr = std::unique( results.begin(), results.end() );
-   results.erase( itr, results.end() );
-   return results;
-}
-
 vector<uint8_t> assemble_wast( const std::string& wast ) {
    IR::Module module;
    std::vector<WAST::Error> parseErrors;
@@ -264,11 +256,11 @@ fc::variant call( const std::string& server, uint16_t port,
 template<typename T>
 fc::variant call( const std::string& server, uint16_t port,
                   const std::string& path,
-                  const T& v ) { ilog("voy a call ${a}", ("a",path));  return call( server, port, path, fc::variant(v) ); }
+                  const T& v ) { return call( server, port, path, fc::variant(v) ); }
 
 template<typename T>
 fc::variant call( const std::string& path,
-                  const T& v ) { ilog("voy a call ${a}", ("a",path)); return call( host, port, path, fc::variant(v) ); }
+                  const T& v ) { return call( host, port, path, fc::variant(v) ); }
 
 eosio::chain_apis::read_only::get_info_results get_info() {
   return call(host, port, get_info_func ).as<eosio::chain_apis::read_only::get_info_results>();
@@ -280,8 +272,6 @@ void sign_transaction(signed_transaction& trx) {
    auto get_arg = fc::mutable_variant_object
          ("transaction", trx)
          ("available_keys", public_keys);
-   wlog("voy a preguntar con:");
-   wdump((get_arg));
    const auto& required_keys = call(host, port, get_required_keys, get_arg);
    // TODO determine chain id
    fc::variants sign_args = {fc::variant(trx), required_keys["required_keys"], fc::variant(chain_id_type{})};
@@ -383,7 +373,7 @@ chain::action create_setproducer(const name& account, const public_key_type& key
    };
 }
 
-chain::action create_newaccount(const name& creator, const name& newaccount, public_key_type owner, public_key_type active, uint64_t deposit) {
+chain::action create_newaccount(const name& creator, const name& newaccount, public_key_type owner, public_key_type active, asset deposit) {
    return action {
       vector<chain::permission_level>{{creator,config::active_name}},
       contracts::newaccount{
@@ -422,7 +412,6 @@ struct set_account_permission_subcommand {
    string permissionStr;
    string authorityJsonOrFile;
    string parentStr;
-   //string permissionAuth = config::active_name;
    bool skip_sign;
 
    set_account_permission_subcommand(CLI::App* accountCmd) {
@@ -471,7 +460,7 @@ struct set_account_permission_subcommand {
                if (itr != existing_permissions.end()) {
                   parent = name((*itr).get_object()["parent"].get_string());
                } else {
-                  // if this is a new permission and there is no parent we default to config::active_name
+                  // if this is a new permission and there is no parent we default to "active"
                   parent = name(config::active_name);
 
                }
@@ -647,6 +636,7 @@ int main( int argc, char** argv ) {
    string table;
    string lower;
    string upper;
+   string table_key;
    bool binary = false;
    uint32_t limit = 10;
    auto getTable = get->add_subcommand( "table", localized("Retrieve the contents of a database table"), false);
@@ -655,7 +645,7 @@ int main( int argc, char** argv ) {
    getTable->add_option( "table", table, localized("The name of the table as specified by the contract abi") )->required();
    getTable->add_option( "-b,--binary", binary, localized("Return the value as BINARY rather than using abi to interpret as JSON") );
    getTable->add_option( "-l,--limit", limit, localized("The maximum number of rows to return") );
-   getTable->add_option( "-k,--key", limit, localized("The name of the key to index by as defined by the abi, defaults to primary key") );
+   getTable->add_option( "-k,--key", table_key, localized("The name of the key to index by as defined by the abi, defaults to primary key") );
    getTable->add_option( "-L,--lower", lower, localized("JSON representation of lower bound value of key, defaults to first") );
    getTable->add_option( "-U,--upper", upper, localized("JSON representation of upper bound value value of key, defaults to last") );
 
@@ -664,6 +654,10 @@ int main( int argc, char** argv ) {
                          ("scope",scope)
                          ("code",code)
                          ("table",table)
+                         ("table_key",table_key)
+                         ("lower_bound",lower)
+                         ("upper_bound",upper)
+                         ("limit",limit)
                          );
 
       std::cout << fc::json::to_pretty_string(result)
