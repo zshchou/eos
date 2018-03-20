@@ -97,15 +97,15 @@
 			pkg=$( echo "${line}" | cut -d',' -f1 )
 			printf "\tChecking $pkg ... "
 			BIN=$(which $pkg)
-			if [ $? -eq 0 ]; then
-			
-				if [ $pkg == "libtool" ] && [ $BIN == /usr/bin/libtool ]; then
-					donothing=true
-				else
-					printf "\t$pkg found\n"
-					continue
-				fi
-			fi
+			flag=[ $? -eq 0 ]
+		        if [ $pkg == "libtool" ]; then
+			  flag=[ $BIN == /usr/bin/libtool ]
+			if flag then
+			  printf "\t$pkg found\n"
+			  continue
+		        else
+			  donothing=true
+		        fi
 			
 			LIB=$( ls -l /usr/local/lib/lib${pkg}* 2>/dev/null | wc -l)
 			if [ ${LIB} -ne 0 ]; then
